@@ -1,9 +1,8 @@
-// RD Multi-Scraper - Node.js/Express Version
-// NO TIMEOUTS - Can test as many magnets as needed
+// RD Multi-Scraper - OPTIMIZED with Parallel Processing
+// Tests magnets in parallel batches - much faster!
 
 import express from 'express';
 import fetch from 'node-fetch';
-import FormData from 'form-data';
 
 const app = express();
 const PORT = process.env.PORT || 80;
@@ -41,9 +40,9 @@ const SCRAPERS = {
 
 const ADDON_MANIFEST = {
     id: 'com.universal.scraper.realdebrid.nodejs',
-    version: '4.0.0',
-    name: 'RD Multi-Scraper (Node.js)',
-    description: 'No timeout limits - tests as many magnets as needed',
+    version: '5.0.0',
+    name: 'RD Multi-Scraper (Optimized)',
+    description: 'Parallel processing - faster results',
     logo: 'https://png.pngtree.com/png-clipart/20240327/original/pngtree-explosion-nuclear-bomb-png-image_14690537.png',
     resources: ['stream'],
     types: ['movie', 'series'],
@@ -52,7 +51,7 @@ const ADDON_MANIFEST = {
 };
 
 // ============================================
-// REAL-DEBRID CLASS
+// OPTIMIZED REAL-DEBRID CLASS
 // ============================================
 
 class RealDebrid {
@@ -71,12 +70,11 @@ class RealDebrid {
         const response = await fetch(url, {
             ...options,
             headers,
-            timeout: 15000
+            timeout: 10000
         });
 
         if (!response.ok) {
-            const text = await response.text();
-            throw new Error(`RD_${response.status}: ${text}`);
+            throw new Error(`RD_${response.status}`);
         }
 
         if (response.status === 204) return null;
@@ -85,7 +83,6 @@ class RealDebrid {
 
     async testMagnetCached(magnetLink, targetSeason = null, targetEpisode = null) {
         try {
-            // Add magnet
             const formData = new URLSearchParams();
             formData.append('magnet', magnetLink);
 
@@ -96,20 +93,16 @@ class RealDebrid {
             });
 
             const torrentId = addResponse.id;
-            await this.delay(1000);
+            await this.delay(800);
 
-            // Get torrent info
             let torrent = await this.makeRequest(`/torrents/info/${torrentId}`);
 
-            // Handle file selection
             if (torrent.status === 'waiting_files_selection') {
                 const videoFiles = torrent.files.filter(f => 
                     this.isVideoFile(f.path) && f.bytes > 50 * 1024 * 1024
                 );
 
-                if (videoFiles.length === 0) {
-                    throw new Error('NO_VIDEO');
-                }
+                if (videoFiles.length === 0) throw new Error('NO_VIDEO');
 
                 let selectedFile = null;
                 if (targetSeason && targetEpisode) {
@@ -129,11 +122,10 @@ class RealDebrid {
                     body: selectFormData.toString()
                 });
 
-                await this.delay(1500);
+                await this.delay(1000);
                 torrent = await this.makeRequest(`/torrents/info/${torrentId}`);
             }
 
-            // Check if cached
             if (torrent.status === 'downloading' || torrent.status === 'queued') {
                 throw new Error('NOT_CACHED');
             }
@@ -142,11 +134,8 @@ class RealDebrid {
                 throw new Error(`STATUS_${torrent.status}`);
             }
 
-            // Get download link
             const selectedFiles = torrent.files.filter(f => f.selected === 1);
-            if (selectedFiles.length === 0) {
-                throw new Error('NO_SELECTED');
-            }
+            if (selectedFiles.length === 0) throw new Error('NO_SELECTED');
 
             const fileIndex = torrent.files.indexOf(selectedFiles[0]);
             const downloadLink = torrent.links[fileIndex];
@@ -230,7 +219,6 @@ class ScraperAggregator {
             }
         });
 
-        // Dedupe
         const seen = new Set();
         const unique = allStreams.filter(s => {
             if (seen.has(s.infoHash)) return false;
@@ -251,7 +239,7 @@ class ScraperAggregator {
                     'User-Agent': 'Mozilla/5.0',
                     'Accept': 'application/json'
                 },
-                timeout: 15000
+                timeout: 12000
             });
 
             if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -328,7 +316,8 @@ function getQualitySymbol(quality) {
 async function getTMDBDetails(imdbId) {
     try {
         const response = await fetch(
-            `${TMDB_BASE_URL}/find/${imdbId}?api_key=${TMDB_API_KEY}&external_source=imdb_id`
+            `${TMDB_BASE_URL}/find/${imdbId}?api_key=${TMDB_API_KEY}&external_source=imdb_id`,
+            { timeout: 5000 }
         );
         const data = await response.json();
         
@@ -377,10 +366,77 @@ function smartSortStreams(streams) {
 }
 
 // ============================================
+// PARALLEL BATCH TESTER
+// ============================================
+
+async function testStreamsInParallel(streams, rd, targetStreams, season, episode) {
+    const BATCH_SIZE = 5; // Test 5 at a time
+    const MAX_TESTS = 20; // Reduced from 25
+    const finalStreams = [];
+    
+    console.log(`\n🧪 Testing up to ${MAX_TESTS} magnets (${BATCH_SIZE} parallel)...`);
+
+    const streamsToTest = streams.slice(0, MAX_TESTS);
+    
+    for (let i = 0; i < streamsToTest.length && finalStreams.length < targetStreams; i += BATCH_SIZE) {
+        const batch = streamsToTest.slice(i, i + BATCH_SIZE);
+        
+        const batchPromises = batch.map(async (stream, idx) => {
+            const testNum = i + idx + 1;
+            console.log(`${testNum}/${MAX_TESTS}: ${stream.quality || '?'} | ${stream.scraperSource}`);
+            
+            try {
+                const result = await rd.testMagnetCached(stream.magnetLink, season, episode);
+                
+                if (result && result.url) {
+                    const quality = stream.quality || extractQuality(result.filename);
+                    const qualitySymbol = getQualitySymbol(quality);
+                    const fileSize = formatFileSize(result.filesize);
+
+                    console.log(`✅ CACHED! ${quality}`);
+
+                    return {
+                        name: [
+                            `⚡ ${qualitySymbol}`,
+                            quality,
+                            fileSize,
+                            stream.scraperSource
+                        ].filter(Boolean).join(' | '),
+                        title: `🎬 ${quality}\n💾 ${fileSize}\n🌱 ${stream.scraperSource}\n📁 ${result.filename.split('/').pop()}\n\n⚡ Real-Debrid Cached`,
+                        url: result.url,
+                        quality: quality
+                    };
+                }
+            } catch (error) {
+                console.log(`❌ ${error.message.substring(0, 20)}`);
+            }
+            
+            return null;
+        });
+
+        const batchResults = await Promise.allSettled(batchPromises);
+        
+        batchResults.forEach(result => {
+            if (result.status === 'fulfilled' && result.value && finalStreams.length < targetStreams) {
+                finalStreams.push(result.value);
+            }
+        });
+
+        if (finalStreams.length >= targetStreams) break;
+        
+        // Small delay between batches
+        if (i + BATCH_SIZE < streamsToTest.length) {
+            await new Promise(resolve => setTimeout(resolve, 500));
+        }
+    }
+
+    return finalStreams;
+}
+
+// ============================================
 // EXPRESS ROUTES
 // ============================================
 
-// CORS middleware
 app.use((req, res, next) => {
     res.header('Access-Control-Allow-Origin', '*');
     res.header('Access-Control-Allow-Methods', 'GET, OPTIONS');
@@ -391,12 +447,10 @@ app.use((req, res, next) => {
     next();
 });
 
-// Manifest
 app.get('/manifest.json', (req, res) => {
     res.json(ADDON_MANIFEST);
 });
 
-// Stream endpoint
 app.get('/stream/:type/:id', async (req, res) => {
     try {
         const { type, id: rawId } = req.params;
@@ -433,63 +487,12 @@ app.get('/stream/:type/:id', async (req, res) => {
             return res.json({ streams: [] });
         }
 
-        // Sort and test
+        // Sort
         const sortedStreams = smartSortStreams(allStreams);
+        
+        // Test in parallel
         const rd = new RealDebrid(HARDCODED_REALDEBRID_KEY);
-        const finalStreams = [];
-        const TARGET_STREAMS = 10;
-        const MAX_TESTS = 25; // Can test MORE now - no timeout!
-
-        console.log(`\n🧪 Testing up to ${MAX_TESTS} magnets...`);
-
-        for (let i = 0; i < sortedStreams.length && finalStreams.length < TARGET_STREAMS && i < MAX_TESTS; i++) {
-            const stream = sortedStreams[i];
-
-            console.log(`${i + 1}/${MAX_TESTS}: ${stream.quality || '?'} | ${stream.scraperSource}`);
-
-            try {
-                const result = await rd.testMagnetCached(stream.magnetLink, season, episode);
-
-                if (result && result.url) {
-                    const quality = stream.quality || extractQuality(result.filename);
-                    const qualitySymbol = getQualitySymbol(quality);
-                    const fileSize = formatFileSize(result.filesize);
-
-                    const streamName = [
-                        `⚡ ${qualitySymbol}`,
-                        quality,
-                        fileSize,
-                        stream.scraperSource
-                    ].filter(Boolean).join(' | ');
-
-                    const titleLines = [
-                        `🎬 ${mediaDetails.title}${mediaDetails.year ? ` (${mediaDetails.year})` : ''}`,
-                        type === 'series' ? `S${season}E${episode}` : '',
-                        ``,
-                        `📺 ${quality}`,
-                        `💾 ${fileSize}`,
-                        `🌱 ${stream.scraperSource}`,
-                        ``,
-                        `📁 ${result.filename.split('/').pop()}`,
-                        ``,
-                        `⚡ Real-Debrid Cached`
-                    ].filter(Boolean);
-
-                    finalStreams.push({
-                        name: streamName,
-                        title: titleLines.join('\n'),
-                        url: result.url
-                    });
-
-                    console.log(`✅ CACHED! (${finalStreams.length}/${TARGET_STREAMS})`);
-                }
-            } catch (error) {
-                console.log(`❌ ${error.message}`);
-            }
-
-            // Small delay
-            await new Promise(resolve => setTimeout(resolve, 300));
-        }
+        const finalStreams = await testStreamsInParallel(sortedStreams, rd, 10, season, episode);
 
         console.log(`\n🎉 Returning ${finalStreams.length} streams\n`);
 
@@ -497,7 +500,7 @@ app.get('/stream/:type/:id', async (req, res) => {
             return res.json({
                 streams: [{
                     name: `🚫 No Cached`,
-                    title: `Tested ${MAX_TESTS} torrents - none cached on RD`,
+                    title: `No cached torrents found on RD`,
                     url: "",
                     behaviorHints: { notWebReady: true }
                 }]
@@ -519,16 +522,14 @@ app.get('/stream/:type/:id', async (req, res) => {
     }
 });
 
-// Health check
 app.get('/health', (req, res) => {
     res.json({
         status: 'OK',
-        addon: 'RD Multi-Scraper Node.js',
-        version: '4.0.0'
+        addon: 'RD Multi-Scraper Optimized',
+        version: '5.0.0'
     });
 });
 
-// Start server
 app.listen(PORT, () => {
     console.log(`🚀 RD Multi-Scraper running on port ${PORT}`);
     console.log(`📍 Manifest: http://localhost:${PORT}/manifest.json`);
