@@ -6,7 +6,7 @@ import fetch from 'node-fetch';
 import FormData from 'form-data';
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 80;
 
 const HARDCODED_REALDEBRID_KEY = 'IFQJ23NXPNHB53WNWTNABOZLPHUVCRAJTNZSVJHCHYFHBF2Z6WWQ';
 const TMDB_API_KEY = 'f051e7366c6105ad4f9aafe4733d9dae';
